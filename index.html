@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>無限迷宮 深潜</title>
+<script>
+  /* 全国ランキングの接続先。Cloudflare Worker のURL（https://〜.workers.dev）を '' の中に貼る */
+  window.RANK_API = 'https://mugen-rank.fukasyun0509.workers.dev/';
+</script>
 <meta name="description" content="追跡者から逃げながら、どこまで潜り、どれだけの宝を手にできるか。無限に続く3Dダンジョン探索ゲーム。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -166,6 +170,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lantern);outlin
       <div class="rank">
         <h2>ランキング</h2>
         <div class="tabs" role="tablist">
+          <button role="tab" aria-selected="false" data-tab="global" class="tabGlobal" hidden>全国ランキング</button>
           <button role="tab" aria-selected="true" data-tab="local">この端末</button>
           <button role="tab" aria-selected="false" data-tab="shared" class="tabShared" hidden>みんなの記録</button>
         </div>
@@ -198,7 +203,8 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--lantern);outlin
     <p class="note" id="saveMsg"></p>
     <div class="rank">
       <div class="tabs" role="tablist">
-        <button role="tab" aria-selected="true" data-tab="local">この端末</button>
+        <button role="tab" aria-selected="false" data-tab="global" class="tabGlobal" hidden>全国ランキング</button>
+          <button role="tab" aria-selected="true" data-tab="local">この端末</button>
         <button role="tab" aria-selected="false" data-tab="shared" class="tabShared" hidden>みんなの記録</button>
       </div>
       <ol id="rankOver"></ol>
@@ -863,33 +869,60 @@ function updateCaught(dt){
 
 /* ================= ランキング ================= */
 const LKEY='mugen_shinsen_rank_v1', NKEY='mugen_shinsen_name';
+const RANK_API=(window.RANK_API||'').trim();
 function loadLocal(){try{return JSON.parse(localStorage.getItem(LKEY))||[];}catch(e){return [];}}
 function saveLocal(list){try{localStorage.setItem(LKEY,JSON.stringify(list));}catch(e){}}
-let db=null, sharedCache=[], tabTitle='local', tabOver='local';
+let db=null, sharedCache=[], globalCache=null, globalErr='', tabTitle=RANK_API?'global':'local', tabOver=tabTitle;
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-function listHTML(list){
-  if(!list.length)return '<li class="empty">まだ記録がありません。最初の記録を刻んでください。</li>';
+function listHTML(list,empty){
+  if(!list)return '<li class="empty">読み込み中…</li>';
+  if(!list.length)return '<li class="empty">'+(empty||'まだ記録がありません。最初の記録を刻んでください。')+'</li>';
   return list.map((r,i)=>`<li><span class="rk">${i+1}</span><span class="nm">${esc(r.name||'名無し')}</span><span class="sc">${Number(r.score||0).toLocaleString()}</span><span class="dt">地下${Number(r.depth)||0}階まで到達 / ${Number(r.points||0).toLocaleString()} pt</span></li>`).join('');
 }
-async function fetchShared(){if(!db)return;try{const snap=await db.collection('scores').orderBy('score','desc').limit(15).get();sharedCache=snap.docs.map(d=>d.data());}catch(e){}}
-async function renderRanks(){
-  $('rankTitle').innerHTML=listHTML(tabTitle==='local'?loadLocal():sharedCache);
-  $('rankOver').innerHTML=listHTML(tabOver==='local'?loadLocal():sharedCache);
-  if(db){await fetchShared();if(tabTitle==='shared')$('rankTitle').innerHTML=listHTML(sharedCache);if(tabOver==='shared')$('rankOver').innerHTML=listHTML(sharedCache);}
+function listFor(tab){
+  if(tab==='global')return globalErr?listHTML([],globalErr):listHTML(globalCache);
+  if(tab==='shared')return listHTML(sharedCache);
+  return listHTML(loadLocal());
 }
+async function fetchGlobal(){
+  if(!RANK_API)return;
+  try{
+    const r=await fetch(RANK_API+'?action=top&limit=30');
+    const j=await r.json(); if(!j.ok)throw new Error(j.error||'error');
+    globalCache=j.top||[]; globalErr='';
+  }catch(e){globalErr='全国ランキングに接続できませんでした。通信状況を確認してください。';}
+}
+async function submitGlobal(rec){
+  const r=await fetch(RANK_API,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(rec)});
+  const j=await r.json(); if(!j.ok)throw new Error(j.error||'error'); return j;
+}
+async function fetchShared(){if(!db)return;try{const snap=await db.collection('scores').orderBy('score','desc').limit(15).get();sharedCache=snap.docs.map(d=>d.data());}catch(e){}}
+function paintRanks(){$('rankTitle').innerHTML=listFor(tabTitle);$('rankOver').innerHTML=listFor(tabOver);}
+async function renderRanks(){
+  paintRanks();
+  await Promise.all([fetchGlobal(),fetchShared()]);
+  paintRanks();
+}
+function syncTabs(){
+  document.querySelectorAll('.tabs').forEach(tabs=>{
+    const cur=tabs.closest('#title')?tabTitle:tabOver;
+    tabs.querySelectorAll('button').forEach(x=>x.setAttribute('aria-selected',x.dataset.tab===cur?'true':'false'));
+  });
+}
+if(RANK_API)document.querySelectorAll('.tabGlobal').forEach(b=>b.hidden=false);
+syncTabs();
 document.querySelectorAll('.tabs').forEach(tabs=>{
   tabs.addEventListener('click',e=>{
     const b=e.target.closest('button');if(!b)return;
-    tabs.querySelectorAll('button').forEach(x=>x.setAttribute('aria-selected',x===b?'true':'false'));
     if(tabs.closest('#title'))tabTitle=b.dataset.tab;else tabOver=b.dataset.tab;
-    renderRanks();
+    syncTabs(); paintRanks();
   });
 });
-// claude.ai 上で開いた時だけ「みんなの記録」を有効化（GitHub Pages では端末内ランキングのみ）
+// claude.ai 上で開いた時だけ「みんなの記録」を有効化
 if(window.claude&&typeof window.claude.use==='function'){
   window.claude.use('db').then(d=>{if(!d)return;db=d;document.querySelectorAll('.tabShared').forEach(b=>b.hidden=false);renderRanks();}).catch(()=>{});
 }
-let saved=false;
+let saved=false, localRank=0;
 function gameOver(){
   S.state='over';camera.rotation.z=0;
   if(document.pointerLockElement)document.exitPointerLock();
@@ -903,19 +936,24 @@ function gameOver(){
   $('oBest').textContent=best?best.name+'（'+TIERS[best.tier].label+'）':'なし';
   $('oFormula').innerHTML=S.points.toLocaleString()+' pt × 地下'+S.depth+'階<b>'+score.toLocaleString()+'</b>';
   try{$('nameIn').value=localStorage.getItem(NKEY)||'';}catch(e){}
-  saved=false;$('btnSave').disabled=score<=0;$('saveMsg').textContent=score<=0?'宝を拾えなかったため、記録はありません。':'';
+  saved=false;localRank=0;$('btnSave').disabled=score<=0;$('saveMsg').textContent=score<=0?'宝を拾えなかったため、記録はありません。':'';
   show('over');renderRanks();
 }
 $('btnSave').onclick=async()=>{
   if(saved)return;
   const name=($('nameIn').value.trim()||'名無し').slice(0,12);
   try{localStorage.setItem(NKEY,name);}catch(e){}
-  const rec={name,score:S.points*S.depth,depth:S.depth,points:S.points,at:Date.now()};
-  const list=loadLocal();list.push(rec);list.sort((a,b)=>b.score-a.score);saveLocal(list.slice(0,15));
+  const rec={name,score:S.points*S.depth,depth:S.depth,points:S.points,items:S.items.length,legends:S.legends.size,at:Date.now()};
+  if(!localRank){const list=loadLocal();list.push(rec);list.sort((a,b)=>b.score-a.score);saveLocal(list.slice(0,15));localRank=list.indexOf(rec)+1;}
   saved=true;$('btnSave').disabled=true;
-  const rank=list.indexOf(rec)+1;
-  $('saveMsg').textContent=rank<=15?'この端末で '+rank+' 位に記録しました。':'記録しましたが、この端末の上位15位には入りませんでした。';
-  if(db){try{await db.collection('scores').add(rec);$('saveMsg').textContent+=' みんなの記録にも登録しました。';}catch(e){}}
+  const msgs=[localRank<=15?'この端末で '+localRank+' 位。':'この端末の上位15位には入りませんでした。'];
+  $('saveMsg').textContent=msgs.join(' ')+(RANK_API?' 全国ランキングに送信中…':'');
+  if(RANK_API){
+    try{const j=await submitGlobal(rec);msgs.push('全国 '+Number(j.rank).toLocaleString()+' 位（'+Number(j.total).toLocaleString()+'件中）に登録しました。');}
+    catch(e){msgs.push('全国ランキングへの送信に失敗しました。通信状況を確認してください。');saved=false;$('btnSave').disabled=false;}
+  }
+  if(db){try{await db.collection('scores').add(rec);msgs.push('みんなの記録にも登録しました。');}catch(e){}}
+  $('saveMsg').textContent=msgs.join(' ');
   renderRanks();
 };
 
